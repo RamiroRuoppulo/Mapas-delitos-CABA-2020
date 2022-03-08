@@ -1,0 +1,302 @@
+---
+title: "Mapas con delitos CABA 2020"
+author: "Ramiro Ruoppulo"
+date: "2/3/2022"
+output: html_document
+---
+
+#Cargamos librerias
+```{r setup, include=TRUE}
+library(tidyverse)
+library(readr)
+library(leaflet)
+library(leaflet.providers)
+library(readxl)
+library(sf)
+```
+
+#Cargamos los data frame que utilizaremos
+```{r}
+Delitos_2020<-read.csv("https://cdn.buenosaires.gob.ar/datosabiertos/datasets/ministerio-de-justicia-y-seguridad/delitos/delitos_2020.csv", encoding = "UTF-8",stringsAsFactors = F)
+Pob_comunas<-read_xls("Poblacion comunas caba.xls")
+Comunas<-st_read("https://cdn.buenosaires.gob.ar/datosabiertos/datasets/comunas/comunas.csv")
+Barrios<-st_read("https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.csv")
+```
+
+
+                ###Limpieza y transformacion de datos###
+
+```{r}
+#Primero eliminamos los datos referidos a los siniestros viales, ya que estos no nos interesan.
+Delitos_2020%>%
+  filter(subtipo!="Siniestro Vial")->Delitos_2020
+
+#Luego eliminados todas aquellas filas en que, en la columna latitud y longitud, encontremos la observacion SD (sin dato), ya que solo nos interesan las observaciones que poseen los datos de latitud y longitud.
+Delitos_2020%>%
+  filter(latitud!="SD")->Delitos_2020
+
+#Ahora modificamos el dataset Pob_comunas, quedandonos unicamente con las proyecciones de la cantidad de habitantes por comuna para el año 2020
+Pob_comunas<-Pob_comunas%>%
+  select("2020" | "Comuna")%>%
+  filter(Comuna != "Total")%>%
+  rename(Habitantes="2020")
+
+#Aqui creamos un dataset agrupando la cantidad de delitos totales por comuna. Por otro lado, con la funcion rename, modificamos el nombre  de la columna "comuna", para que esta coincida con el nombre de la columa "COMUNAS", del dataset Comunas, y poder así unir ambos dataset
+Delitos_tot<-Delitos_2020%>%
+  group_by(comuna)%>%
+  summarise(Cant_del=n())%>%
+  rename(COMUNAS=comuna)
+
+Pob_comunas$Comuna<-as.numeric(Pob_comunas$Comuna)
+Comunas$COMUNAS<-as.numeric(Comunas$COMUNAS)
+Delitos_tot$COMUNAS<-as.numeric(Delitos_tot$COMUNAS)
+
+Delitos_tot<-Pob_comunas%>%
+  rename(COMUNAS=Comuna)%>%
+  left_join(Delitos_tot, by="COMUNAS")%>%
+  left_join(Comunas, by="COMUNAS")
+
+```
+
+Ahora vamos a crear una funcion para calcular la tasa de delito cada 10.000 habitantes. Luego una vez calculada la tasa para cada comuna, calcularemos la media, para luego identificar aquellas comunas que poseen una actividad delictiva por encima o por debajo de la media
+```{r}
+#Aqui creamos la funcion para calcular la tasa
+Tasa_delitos<-
+  function(X, Y, K=10000){#Aqui estan los argumentos
+    resultado<- X/Y*K#Aqui la operacion a realizar
+    return(round(resultado,2))#Aqui el resultado, junto con la funcion round, para redondear el resultado en un numero tras la coma
+  }
+
+#Luego aplicamos la funcion creada, dandole a los argumentos los valores que deben adoptar. El argumento K no se debe poner, ya que al haber sido definido con el numero 10.000, este actua por default
+Delitos_tot$Tasa_delito<-
+  Tasa_delitos(X = Delitos_tot$Cant_del, Y = Delitos_tot$Habitantes)
+
+#Aqui calculamos la media de la Tasa
+Delitos_tot$Media_delitos<-mean(Delitos_tot$Tasa_delito)%>%round(2)
+
+#Y aqui, con la funcion ifelse, lo que hacemos es, crear una columna en la cual se clasifique a las comunas segun si su activida delictiva se encuentra por debajo o por encima de la media.
+Delitos_tot$Act_del<-
+  ifelse(Delitos_tot$Tasa_delito>Delitos_tot$Media_delitos,
+       "Por encima","Por debajo")
+```
+
+                               ###Graficamos###
+                               
+Creamos un mapa en el cual graficaremos la tasa delictiva cada 10.000 habitantes para cada comuna. Entre mayor sea la cantidad de delitos cada 10.000 habitantes, los colores que adoptaran las comunas seran de un rojo mas intenso.
+```{r}
+bins<-c(130, 150, 170, 190, 210, 230, 250, Inf)#Aqui creo un vector con los valroes que luego usare en la paleta
+
+pal<-colorBin("YlOrRd", domain = Delitos_tot$Tasa_delito, bins = bins)#Aqui creo la paleta, indicando el color, los valores que debera adoptar, en este caso los de la Tasa de delito, y la escala de valores para luego graficar, osea bins
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g delitos cada 10.000 habitantes.</sup>",
+  paste("Comuna", Delitos_tot$COMUNAS), Delitos_tot$Tasa_delito
+) %>% lapply(htmltools::HTML)#Aqui creamos las etiquetas interactivas, que luego en el grafico apareceran al posar el pulsor sobre cada comuna, indicando la informacion que le hemos especificado, en este caso, la tasa de delito para cada comuna
+
+Delitos_tot%>%
+  leaflet()%>%
+  addTiles()%>%
+  setView(lng = -58.445531, lat = -34.606653, zoom = 11)%>%
+  addProviderTiles(providers$CartoDB.DarkMatter)%>%
+  addPolygons(data =st_as_sf(Delitos_tot$geometry),
+              fillColor = ~pal(Delitos_tot$Tasa_delito),
+              weight = 2,
+               opacity = 1,
+               color = "white",
+               dashArray = "3",
+               fillOpacity = 0.7,
+              highlightOptions = highlightOptions(
+                                  weight = 5,
+                                  color = "#666",
+                                  dashArray = "",
+                                  fillOpacity = 0.7,
+                                  bringToFront = TRUE),
+              label = labels,
+              labelOptions = labelOptions(
+                textsize = "12px",
+                direction = "auto"))%>%
+  addLegend(pal = pal,
+            values = ~bins,
+            opacity = 0.7, title = NULL, 
+            position = "bottomright")
+
+rm(labels)#Borro el objeto labels
+rm(bins)#Borro el objeto bins
+rm(pal)#Borro el objeto pal
+```
+
+
+```{r}
+st_geometry(Delitos_tot$geometry)%>%#Aqui lo que hago es especificarle a R que la columna geometry, es una variable geometrica
+  ggplot()+
+  geom_sf(data = Delitos_tot$geometry)+#Aqui mediante el argumento data, indico cual es la columna que contiene las medidas geometricas de las comunas
+  geom_sf(aes(fill=Delitos_tot$Act_del))+#Aqui indico el argumento fill, indico con que valores debe rellenar las comunas
+  labs(title = "Comunas por debajo y por encima de la 
+tasa media de delitos",#Titulo
+       subtitle = "CABA, año 2020",#Subtitulo
+       fill = "")+
+  theme_bw()
+```
+
+
+                      ###Delitos violentos###
+###Aqui lo que haremos sera tener en cuenta aquellos delitos signados por la violencia, es decir que, para ser cometidos se recurrio al uso de la violencia. Esto nos permitira saber si efectivamente hay una distribucion geografica equitativa de los delitos violentos, o mas bien hay una desigual distribucion geografica de los delitos violentos, y con ellos una desigual o no distribucion de la violencia, entendiendo a esta como un producto social negativo.
+
+###Limpieza y transformacion de datos
+
+```{r}
+Delitos_vio<-
+  Delitos_2020%>%
+  filter(tipo=="Robo (con violencia)" | tipo=="Homicidio")
+
+Delitos_vio%>%
+  group_by(comuna)%>%
+  summarise(cant_del=n())%>%
+  rename(COMUNAS=comuna)->Delitos_vio
+
+Pob_comunas%>%
+  rename(COMUNAS=Comuna)%>%
+  left_join(Delitos_vio, by="COMUNAS")%>%
+  left_join(Comunas, by="COMUNAS")->Delitos_vio
+
+Delitos_vio$Tasa_delito<-
+  Tasa_delitos(X = Delitos_vio$cant_del, Y = Delitos_vio$Habitantes)#Aplicamos la funcion que hemos creado, creando así una nueva columna que contenga la tasa de delitos para cada comuna
+
+Delitos_vio$Media_delitos<-mean(Delitos_vio$Tasa_delito)%>%round(2)#Calculamos la media de la tasa de delitos. La funcion round es para redondear el resultado con el numero especificado, es decir, dos digitos despues de la coma en este caso.
+
+Delitos_vio$Act_del<-
+  ifelse(Delitos_vio$Tasa_delito>Delitos_vio$Media_delitos,
+         "Por encima", "Por debajo")#Creamos una nueva columna, en la cual clasificamos a las comunas segun si la tasa de delitos violentos, se encuentra por encima o por debajo de la media calculada en el paso anterior
+```
+
+#Graficamos
+```{r}
+#Aqui repetimos los mismos pasos que hemos realizado para la creacion del anterior mapa leaflet, cambiando unicamente el dataset, utilizando esta vez el dataset Delitos_vio, el cual solo contiene delitos violentos.
+bins<-c(60, 80, 100, 120, 140, 160, Inf)
+
+pal<-colorBin("YlOrRd", domain = Delitos_vio$Tasa_delito, bins = bins)
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g delitos violentos cada 10.000 habitantes.</sup>",
+  paste("Comuna", Delitos_vio$COMUNAS), Delitos_vio$Tasa_delito
+) %>% lapply(htmltools::HTML)
+
+Delitos_vio%>%
+  leaflet()%>%
+  addTiles()%>%
+  setView(lng = -58.445531, lat = -34.606653, zoom = 11)%>%
+  addProviderTiles(providers$CartoDB.DarkMatter)%>%
+  addPolygons(data =st_as_sf(Delitos_vio$geometry),
+              fillColor = ~pal(Delitos_vio$Tasa_delito),
+              weight = 2,
+               opacity = 1,
+               color = "white",
+               dashArray = "3",
+               fillOpacity = 0.7,
+              highlightOptions = highlightOptions(
+                                  weight = 5,
+                                  color = "#666",
+                                  dashArray = "",
+                                  fillOpacity = 0.7,
+                                  bringToFront = TRUE),
+              label = labels,
+              labelOptions = labelOptions(
+                textsize = "12px",
+                direction = "auto"))%>%
+  addLegend(pal = pal,
+            values = ~bins,
+            opacity = 0.7, title = NULL, 
+            position = "bottomright")
+
+rm(labels)
+rm(bins)
+rm(pal)
+```
+
+
+```{r}
+#Aqui tambien repetimos los mismos pasos que hemos realizado el mapa anterior, en donde hemos visualizado las comunas segun se encuentren por debajo o por encima de la media de la tasa de delitos violentos
+st_geometry(Delitos_vio$geometry)%>%
+  ggplot()+
+  geom_sf(data = Delitos_vio$geometry)+
+  geom_sf(aes(fill=Delitos_vio$Act_del))+
+  labs(title = "Comunas por debajo y por encima de la 
+tasa media de delitos violentos",
+       subtitle = "CABA, año 2020",
+       fill = "")+
+  theme_bw()
+```
+
+                             ###Homicidios###
+#Ahora lo que haremos sera graficar la distribucion geografica de los homicidios, e intentaremos ver si la ocurrencia de los homicidios posee una distribucion geografica equitativa, o si mas bien hay una desigual distribucion geografica de los homicidios.
+
+
+```{r}
+#Creamos el dataset homicidios, teniendo en cuenta solo aquellos que no estan relacionados a siniestros viales
+Delitos_2020%>%
+  filter(tipo=="Homicidio")%>%
+  filter(subtipo!="Siniestro Vial")->Homicidios
+
+Nombres_homi<-Homicidios$subtipo%>%unique()#Creamos un vector con los nombres de los distintos subtipos de homicidios presentes en el dataset
+
+Colores_homi<-c('#8dd3c7','#ffffb3','#bebada','#fb8072')#Creamos un vector con cuatro colores, que luego seran asignados a cada subtipo de homicidio
+
+Paleta_homi<-colorFactor(Colores_homi, domain = Nombres_homi)#Creamos la paleta que usaremos en el mapa, uniendo el vector de nombres de los subtipos de homicidios que hemos creado, con el vector de colores
+
+Grupos<-c("Leyenda", Nombres_homi)#Creamos un vector que contiene los nombres de los subtipos de homicidios, junto con la leyenda que tendremos en el mapa. Este vector lo creamos porque lo usaremos en el argumento addLayersControl, el cual nos permitira despejar objetos del mapa a traves de un menu en el lado superior derecho
+
+#Convertimos ambas variables a numerica
+Homicidios$latitud<-as.numeric(Homicidios$latitud)
+Homicidios$longitud<-as.numeric(Homicidios$longitud)
+
+#Creamos un vector con los numeros de las comunas, adjuntandoles la palabra "Comuna" detras a cada una mediante la funcion paste.
+Comunas_Caba<-paste("Comuna", Comunas$COMUNAS)%>%unique()
+
+Barrios_caba <- paste("Barrio", Barrios$barrio)%>%unique()
+
+#Creamos un loop en donde separamos el dataset Homicidios en 4 dataset dentro de una misma lista, segun el subtipo de homicidio
+Loop_homi<-list()
+for( i in 1:length(Nombres_homi)){
+  Loop_homi[[i]] <- Homicidios%>%filter(subtipo == Nombres_homi[i])
+}
+
+names(Loop_homi)<-Nombres_homi#Aqui nombramos a cada dataset contenido dentro de la lista que hemos creado segun los nombres del subtipo de homicidio que les corresponde
+
+```
+
+
+```{r}
+#Creamos el mapa utilizando el loop
+Mapa_loop<-Homicidios%>%
+  leaflet()%>%
+  addTiles()%>%
+  setView(lng = -58.445531, lat = -34.606653, zoom = 11)%>%
+  addProviderTiles(providers$CartoDB.DarkMatter)%>%
+  addPolygons(data = st_as_sf(Delitos_vio$geometry),
+              fillColor = "transparent",
+              stroke = T, weight = 2, opacity = 1,
+              color = "gray", dashArray = "3",
+              group = "Comunas", label = ~Comunas_Caba)%>%
+  addPolygons(data = st_as_sf(Barrios$geometry),
+              fillColor = "transparent",
+              stroke = T, weight = 2, opacity = 1,
+              color = "gray", dashArray = "3",
+              group = "Barrios", label = ~Barrios_caba)%>%
+  addLegend(data = Homicidios, "bottomright",
+            pal = Paleta_homi, values = ~subtipo,
+            title = "Tipo de homicidio", group = "Leyenda")%>%
+  addLayersControl(overlayGroups = c(Grupos, "Comunas", "Barrios"),
+                  options = layersControlOptions(collapsed = T))%>%
+  hideGroup("Barrios")
+for( i in 1:length(Loop_homi)){
+    Mapa_loop <- Mapa_loop %>% addCircles(data = Loop_homi[[i]],
+                                          lat = ~latitud, lng = ~longitud,
+                                          color = ~Paleta_homi(subtipo),
+                                          group = Nombres_homi[i])
+  }
+
+Mapa_loop
+```
+
+
+
